@@ -1,0 +1,12 @@
+{
+  "name": "thanksgiving-fantasy-cloudflare",
+  "version": "1.1.0",
+  "description": "Thanksgiving Fantasy dashboard with Cloudflare Worker backend and live updates",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler pages deploy . --config wrangler.toml"
+  },
+  "devDependencies": {
+    "wrangler": "^3.88.0"
+  }
+}

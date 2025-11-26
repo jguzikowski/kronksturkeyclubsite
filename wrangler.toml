@@ -1,0 +1,13 @@
+name = "thanksgiving-fantasy-pages"
+main = "_worker.js"
+compatibility_date = "2024-09-10"
+pages_build_output_dir = "."
+
+[durable_objects]
+bindings = [
+  { name = "LEAGUE_ROOM", class_name = "LeagueRoom" }
+]
+
+[[migrations]]
+timestamp = 1700000000
+new_classes = ["LeagueRoom"]
