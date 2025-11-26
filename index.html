@@ -489,10 +489,13 @@
     <script>
         let teamsData = [];
         const STORAGE_KEY = 'thanksgiving_fantasy_data';
+        const API_BASE = window.APP_API_BASE || '';
+        let useRemoteSync = true;
+        let eventSource;
 
         // Initialize
-        function init() {
-            loadFromStorage();
+        async function init() {
+            await loadData();
             if (teamsData.length === 0) {
                 // Sample data for testing
                 teamsData = [
@@ -512,7 +515,28 @@
                     }
                 ];
             }
+            startLiveUpdates();
             render();
+        }
+
+        async function loadData() {
+            if (!useRemoteSync) {
+                loadFromStorage();
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/api/data`);
+                if (!response.ok) throw new Error('Failed to fetch shared data');
+                const payload = await response.json();
+                teamsData = Array.isArray(payload.teams) ? payload.teams : [];
+                updateLastUpdate(payload.updatedAt);
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(teamsData));
+            } catch (error) {
+                console.warn('Falling back to local storage, shared backend not reachable:', error);
+                useRemoteSync = false;
+                loadFromStorage();
+            }
         }
 
         function loadFromStorage() {
@@ -527,16 +551,36 @@
             }
         }
 
-        function saveData() {
+        async function saveData(showAlert = true) {
+            if (useRemoteSync) {
+                try {
+                    const response = await fetch(`${API_BASE}/api/data`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ teams: teamsData })
+                    });
+
+                    if (!response.ok) throw new Error('Failed to save to shared backend');
+                    const payload = await response.json();
+                    updateLastUpdate(payload.updatedAt);
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(teamsData));
+                    if (showAlert) alert('✅ Progress saved for everyone!');
+                    return;
+                } catch (error) {
+                    console.warn('Shared save failed, switching to local-only mode:', error);
+                    useRemoteSync = false;
+                }
+            }
+
             localStorage.setItem(STORAGE_KEY, JSON.stringify(teamsData));
             updateLastUpdate();
-            alert('✅ Progress saved!');
+            if (showAlert) alert('✅ Progress saved locally. Shared backend not available.');
         }
 
-        function updateLastUpdate() {
-            const now = new Date();
-            document.getElementById('lastUpdate').textContent = 
-                `Last updated: ${now.toLocaleString()}`;
+        function updateLastUpdate(timestamp) {
+            const date = timestamp ? new Date(timestamp) : new Date();
+            document.getElementById('lastUpdate').textContent =
+                `Last updated: ${date.toLocaleString()}`;
         }
 
         function render() {
@@ -607,13 +651,13 @@
             document.getElementById('teamsGrid').innerHTML = html;
         }
 
-        function updatePlayerPoints(teamIndex, playerIndex, points) {
+        async function updatePlayerPoints(teamIndex, playerIndex, points) {
             teamsData[teamIndex].players[playerIndex].points = parseFloat(points) || 0;
             render();
-            saveData();
+            await saveData(false);
         }
 
-        function addTeam() {
+        async function addTeam() {
             const teamName = prompt('Enter team name:');
             if (teamName) {
                 teamsData.push({
@@ -621,14 +665,14 @@
                     players: []
                 });
                 render();
-                saveData();
+                await saveData(false);
             }
         }
 
-        function addPlayerToTeam(teamIndex) {
+        async function addPlayerToTeam(teamIndex) {
             const playerName = prompt('Enter player name:');
             if (!playerName) return;
-            
+
             const playerTeam = prompt('Enter NFL team (e.g., DAL, DET):');
             if (!playerTeam) return;
 
@@ -638,7 +682,7 @@
                 points: 0
             });
             render();
-            saveData();
+            await saveData(false);
         }
 
         function loadTeamsModal() {
@@ -649,7 +693,7 @@
             document.getElementById('loadModal').classList.remove('active');
         }
 
-        function loadTeamsFromJSON() {
+        async function loadTeamsFromJSON() {
             const jsonText = document.getElementById('jsonInput').value;
             try {
                 const parsed = JSON.parse(jsonText);
@@ -665,7 +709,7 @@
                 }));
 
                 render();
-                saveData();
+                await saveData(false);
                 closeModal();
                 alert('✅ Teams loaded successfully!');
             } catch (e) {
@@ -674,19 +718,50 @@
             }
         }
 
-        function resetData() {
+        async function resetData() {
             if (confirm('⚠️ Are you sure you want to reset all data? This cannot be undone!')) {
                 teamsData = [];
                 localStorage.removeItem(STORAGE_KEY);
                 render();
+                await saveData(false);
                 alert('✅ All data has been reset!');
+            }
+        }
+
+        function startLiveUpdates() {
+            if (!useRemoteSync) return;
+
+            try {
+                eventSource = new EventSource(`${API_BASE}/api/stream`);
+                eventSource.onmessage = (event) => {
+                    try {
+                        const payload = JSON.parse(event.data);
+                        if (Array.isArray(payload.teams)) {
+                            teamsData = payload.teams;
+                            localStorage.setItem(STORAGE_KEY, JSON.stringify(teamsData));
+                            render();
+                            updateLastUpdate(payload.updatedAt);
+                        }
+                    } catch (error) {
+                        console.error('Error parsing live update:', error);
+                    }
+                };
+
+                eventSource.onerror = (error) => {
+                    console.warn('Live updates unavailable, falling back to local-only mode.', error);
+                    useRemoteSync = false;
+                    eventSource.close();
+                };
+            } catch (error) {
+                console.warn('Could not start live updates, continuing locally.', error);
+                useRemoteSync = false;
             }
         }
 
         // Auto-save every 30 seconds
         setInterval(() => {
             if (teamsData.length > 0) {
-                saveData();
+                saveData(false);
             }
         }, 30000);
 
