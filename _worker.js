@@ -46,9 +46,14 @@ export class LeagueRoom {
     return { teams: this.teams, updatedAt: this.updatedAt };
   }
 
-  async handleGet() {
-    return jsonResponse(this.buildPayload());
-  }
+	async handleGet() {
+	// Always pull latest data from Durable Object storage
+	this.teams = (await this.state.storage.get('teams')) || [];
+	this.updatedAt = (await this.state.storage.get('updatedAt')) || new Date().toISOString();
+
+	return jsonResponse(this.buildPayload());
+	}
+
 
   async handlePost(request) {
     let body;
