@@ -146,6 +146,24 @@
             transform: translateY(-1px);
         }
 
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .fetch-live-btn {
+            background: linear-gradient(135deg, var(--gold) 0%, var(--burnt-orange) 100%);
+            border-color: var(--cream);
+            font-size: 1.4rem;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 4px 15px rgba(255, 179, 0, 0.4); }
+            50% { box-shadow: 0 4px 25px rgba(255, 179, 0, 0.8); }
+        }
+
         .standings {
             background: rgba(62, 39, 35, 0.6);
             backdrop-filter: blur(10px);
@@ -404,6 +422,32 @@
             font-style: italic;
         }
 
+        .status-message {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: var(--forest-green);
+            color: var(--cream);
+            padding: 15px 25px;
+            border-radius: 10px;
+            border: 2px solid var(--gold);
+            font-weight: 700;
+            z-index: 2000;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+            transform: translateY(-100px);
+            opacity: 0;
+            transition: all 0.3s ease;
+        }
+
+        .status-message.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .status-message.error {
+            background: var(--red);
+        }
+
         @media (max-width: 768px) {
             .teams-grid {
                 grid-template-columns: 1fr;
@@ -458,6 +502,8 @@
         </header>
 
         <div class="controls">
+            <button class="fetch-live-btn" onclick="fetchLiveScores()">⚡ Fetch Live Scores from ESPN</button>
+            <button id="autoFetchBtn" onclick="toggleAutoFetch()">🤖 Auto-Fetch: OFF</button>
             <button onclick="loadTeamsModal()">📥 Load Teams (JSON)</button>
             <button onclick="addTeam()">➕ Add Team</button>
             <button onclick="saveData()">💾 Save Progress</button>
@@ -473,6 +519,8 @@
 
         <div class="last-update" id="lastUpdate"></div>
     </div>
+
+    <div class="status-message" id="statusMessage"></div>
 
     <div class="modal" id="loadModal">
         <div class="modal-content">
@@ -497,6 +545,19 @@
         const API_BASE = window.APP_API_BASE || '';
         let useRemoteSync = true;
         let eventSource;
+        let autoFetchEnabled = false;
+        let autoFetchInterval = null;
+        let consecutiveErrors = 0;
+        const MAX_CONSECUTIVE_ERRORS = 3;
+        const BASE_FETCH_INTERVAL = 120000; // 2 minutes in milliseconds
+        
+        // Game time windows (ET timezone)
+        const GAME_WINDOWS = [
+            // Thursday games
+            { day: 4, startHour: 12, startMinute: 30, endHour: 23, endMinute: 0 },
+            // Friday game
+            { day: 5, startHour: 15, startMinute: 0, endHour: 18, endMinute: 30 }
+        ];
 
         // Initialize
         async function init() {
@@ -522,6 +583,215 @@
             }
             startLiveUpdates();
             render();
+            
+            // Check if we should auto-enable fetching
+            if (isWithinGameWindow()) {
+                console.log('Currently within game window - auto-fetch available');
+            }
+        }
+
+        function isWithinGameWindow() {
+            const now = new Date();
+            // Convert to ET (UTC-5 or UTC-4 depending on DST)
+            const etOffset = -5 * 60; // Assuming EST
+            const etTime = new Date(now.getTime() + (etOffset + now.getTimezoneOffset()) * 60000);
+            
+            const currentDay = etTime.getDay();
+            const currentHour = etTime.getHours();
+            const currentMinute = etTime.getMinutes();
+            const currentTimeInMinutes = currentHour * 60 + currentMinute;
+            
+            for (const window of GAME_WINDOWS) {
+                if (currentDay === window.day) {
+                    const windowStart = window.startHour * 60 + window.startMinute;
+                    const windowEnd = window.endHour * 60 + window.endMinute;
+                    
+                    if (currentTimeInMinutes >= windowStart && currentTimeInMinutes <= windowEnd) {
+                        return true;
+                    }
+                }
+            }
+            
+            return false;
+        }
+
+        function toggleAutoFetch() {
+            if (autoFetchEnabled) {
+                // Turn OFF
+                autoFetchEnabled = false;
+                if (autoFetchInterval) {
+                    clearInterval(autoFetchInterval);
+                    autoFetchInterval = null;
+                }
+                updateAutoFetchButton();
+                showStatus('🔴 Auto-fetch disabled', false);
+            } else {
+                // Turn ON - but check if within game window
+                if (!isWithinGameWindow()) {
+                    const confirm = window.confirm(
+                        '⚠️ Games are not currently live.\n\n' +
+                        'Auto-fetch works best during:\n' +
+                        '• Thursday: 12:30 PM - 11:00 PM ET\n' +
+                        '• Friday: 3:00 PM - 6:30 PM ET\n\n' +
+                        'Enable anyway?'
+                    );
+                    if (!confirm) return;
+                }
+                
+                autoFetchEnabled = true;
+                consecutiveErrors = 0;
+                startAutoFetch();
+                updateAutoFetchButton();
+                showStatus('🟢 Auto-fetch enabled (every 2 minutes)', false);
+            }
+        }
+
+        function updateAutoFetchButton() {
+            const btn = document.getElementById('autoFetchBtn');
+            if (autoFetchEnabled) {
+                btn.textContent = '🟢 Auto-Fetch: ON';
+                btn.style.background = 'linear-gradient(135deg, var(--forest-green) 0%, #1a6b3a 100%)';
+            } else {
+                btn.textContent = '🔴 Auto-Fetch: OFF';
+                btn.style.background = 'linear-gradient(135deg, var(--forest-green) 0%, var(--burnt-orange) 100%)';
+            }
+        }
+
+        function startAutoFetch() {
+            if (autoFetchInterval) {
+                clearInterval(autoFetchInterval);
+            }
+            
+            // Fetch immediately
+            fetchLiveScoresAuto();
+            
+            // Then every 2 minutes
+            autoFetchInterval = setInterval(() => {
+                if (!isWithinGameWindow() && consecutiveErrors === 0) {
+                    console.log('Outside game window, pausing auto-fetch');
+                    showStatus('⏸️ Auto-fetch paused (outside game window)', false);
+                    return;
+                }
+                
+                fetchLiveScoresAuto();
+            }, BASE_FETCH_INTERVAL);
+        }
+
+        async function fetchLiveScoresAuto() {
+            try {
+                const response = await fetch(`${API_BASE}/api/live-scores`);
+                const data = await response.json();
+                
+                if (!data.success) {
+                    throw new Error(data.error || 'Failed to fetch scores');
+                }
+                
+                // Check if all games are final
+                if (data.allGamesFinal) {
+                    console.log('All games are final, stopping auto-fetch');
+                    autoFetchEnabled = false;
+                    if (autoFetchInterval) {
+                        clearInterval(autoFetchInterval);
+                        autoFetchInterval = null;
+                    }
+                    updateAutoFetchButton();
+                    showStatus('✅ All games final - auto-fetch stopped', false);
+                    return;
+                }
+                
+                let updatedCount = 0;
+                
+                // Update player points
+                for (const team of teamsData) {
+                    for (const player of team.players) {
+                        const playerKey = `${player.name}|${player.team}`;
+                        
+                        if (data.players[playerKey]) {
+                            const newPoints = data.players[playerKey].points || 0;
+                            player.points = newPoints;
+                            updatedCount++;
+                        }
+                    }
+                }
+                
+                if (updatedCount > 0) {
+                    render();
+                    await saveData(false);
+                    console.log(`Auto-updated ${updatedCount} players from ${data.gamesCount} games`);
+                }
+                
+                // Reset error counter on success
+                consecutiveErrors = 0;
+                
+            } catch (error) {
+                console.error('Auto-fetch error:', error);
+                consecutiveErrors++;
+                
+                if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                    autoFetchEnabled = false;
+                    if (autoFetchInterval) {
+                        clearInterval(autoFetchInterval);
+                        autoFetchInterval = null;
+                    }
+                    updateAutoFetchButton();
+                    showStatus('❌ Auto-fetch stopped (too many errors). Click to retry.', true);
+                }
+            }
+        }
+
+        // NEW: Fetch live scores from ESPN via Cloudflare Worker
+        async function fetchLiveScores() {
+            showStatus('Fetching live scores from ESPN...', false);
+            
+            const fetchButton = event.target;
+            fetchButton.disabled = true;
+            fetchButton.textContent = '⏳ Fetching...';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/live-scores`);
+                const data = await response.json();
+                
+                if (!data.success) {
+                    throw new Error(data.error || 'Failed to fetch scores');
+                }
+                
+                let updatedCount = 0;
+                
+                // Update player points based on ESPN data
+                for (const team of teamsData) {
+                    for (const player of team.players) {
+                        const playerKey = `${player.name}|${player.team}`;
+                        
+                        if (data.players[playerKey]) {
+                            const newPoints = data.players[playerKey].points || 0;
+                            player.points = newPoints;
+                            updatedCount++;
+                        }
+                    }
+                }
+                
+                render();
+                await saveData(false);
+                
+                showStatus(`✅ Updated ${updatedCount} players from ${data.gamesCount} games!`, false);
+                
+            } catch (error) {
+                console.error('Error fetching live scores:', error);
+                showStatus('❌ Failed to fetch scores. Try again or enter manually.', true);
+            } finally {
+                fetchButton.disabled = false;
+                fetchButton.textContent = '⚡ Fetch Live Scores from ESPN';
+            }
+        }
+
+        function showStatus(message, isError) {
+            const statusEl = document.getElementById('statusMessage');
+            statusEl.textContent = message;
+            statusEl.className = 'status-message show' + (isError ? ' error' : '');
+            
+            setTimeout(() => {
+                statusEl.classList.remove('show');
+            }, 4000);
         }
 
         async function loadData() {
